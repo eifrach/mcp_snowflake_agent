@@ -15,7 +15,7 @@ A Google ADK agent that integrates with JIRA data through a Model Context Protoc
 ### 1. Install Dependencies
 
 ```bash
-pip install -e .
+uv sync
 ```
 
 ### 2. Environment Configuration
@@ -23,7 +23,7 @@ pip install -e .
 Copy the example environment file and configure your credentials:
 
 ```bash
-cp .env.example .env
+cp .env.example ./snowflake_adk_agent/.env
 ```
 
 Edit `.env` with your actual values:
@@ -35,11 +35,16 @@ JIRA_MCP_SSE_URL=https://your-jira-mcp-server.example.com/sse
 # Snowflake Token - Your authentication token for Snowflake access
 JIRA_MCP_SNOWFLAKE_TOKEN=your_snowflake_token_here
 ```
-
-### 3. Run the Agent
+### 3. Login to google cloud account
 
 ```bash
-python main.py
+gcloud auth application-default login
+```
+
+### 4. Run the Agent locally with web
+
+```bash
+uv run adk web --port=8001
 ```
 
 ## Architecture
