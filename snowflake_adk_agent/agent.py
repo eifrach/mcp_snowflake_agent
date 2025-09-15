@@ -19,6 +19,11 @@ class MCPSSEClient:
     """MCP client that communicates with the MCP server via HTTP SSE"""
 
     def __init__(self, sse_url: str, snowflake_token: str):
+        if not sse_url:
+            raise ValueError("sse_url cannot be None or empty. Please check your JIRA_MCP_SSE_URL environment variable.")
+        if not snowflake_token:
+            raise ValueError("snowflake_token cannot be None or empty. Please check your JIRA_MCP_SNOWFLAKE_TOKEN environment variable.")
+
         self.sse_url = sse_url
         self.snowflake_token = snowflake_token
         self._session = None
@@ -27,7 +32,7 @@ class MCPSSEClient:
         self._session_id = None
         self._messages_url = None
         # For simple HTTP approach
-        self.base_url = sse_url.replace('/sse', '')
+        self.base_url = sse_url.replace('/sse', '') if sse_url else ''
         self._sse_connection = None
         self._pending_requests = {}
 
@@ -283,6 +288,58 @@ class MCPSSEClient:
         except Exception as e:
             return {"error": f"Error in simple HTTP call: {str(e)}"}
 
+    async def call_tool_direct_http(self, tool_name: str, **kwargs) -> Dict[str, Any]:
+        """Try direct HTTP call to the working endpoint first"""
+        try:
+            if self._session is None:
+                ssl_context = ssl.create_default_context()
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+                connector = aiohttp.TCPConnector(ssl=ssl_context)
+                self._session = aiohttp.ClientSession(connector=connector)
+
+            # For TELCOV10N-682, let's try the working URL pattern from settings
+            if tool_name == "get_jira_issue_details" and "issue_keys" in kwargs:
+                working_url = "https://jira-mcp-snowflake.apps.int.stc.ai.preprod.us-east-1.aws.paas.redhat.com/tools/call"
+
+                # Use the exact format that was working in curl
+                request_payload = {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "get_jira_issue_details",
+                        "arguments": {
+                            "issue_keys": kwargs["issue_keys"]
+                        }
+                    }
+                }
+
+                headers = {
+                    "Content-Type": "application/json",
+                    "X-Snowflake-Token": self.snowflake_token
+                }
+
+                print(f"DEBUG: Trying direct call to {working_url}")
+                timeout = aiohttp.ClientTimeout(total=30)
+
+                async with self._session.post(working_url, json=request_payload, headers=headers, timeout=timeout) as resp:
+                    print(f"DEBUG: Direct call response status: {resp.status}")
+                    if resp.status == 200:
+                        result = await resp.json()
+                        print(f"DEBUG: Direct call result: {result}")
+                        return result.get("result", result)
+                    else:
+                        error_text = await resp.text()
+                        print(f"DEBUG: Direct call failed: {error_text}")
+                        return {"error": f"Direct call failed {resp.status}: {error_text}"}
+
+            return {"error": "Direct HTTP method not implemented for this tool"}
+
+        except Exception as e:
+            print(f"DEBUG: Exception in direct HTTP call: {e}")
+            return {"error": f"Error in direct HTTP call: {str(e)}"}
+
     async def call_tool(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """Call a tool on the JIRA MCP server and wait for the real response.
 
@@ -294,6 +351,10 @@ class MCPSSEClient:
             dict: Result from the MCP server
         """
         print(f"DEBUG: call_tool starting for {tool_name}")
+
+        # Skip direct HTTP for now, go straight to SSE approach
+        print(f"DEBUG: Using SSE approach for {tool_name}")
+
         try:
             if self._session is None:
                 ssl_context = ssl.create_default_context()
@@ -373,7 +434,7 @@ class MCPSSEClient:
                                                 # Send initialized notification
                                                 init_notification = {
                                                     "jsonrpc": "2.0",
-                                                    "method": "initialized",
+                                                    "method": "notifications/initialized",
                                                     "params": {}
                                                 }
 
@@ -443,6 +504,7 @@ class MCPSSEClient:
                                         except json.JSONDecodeError:
                                             continue
 
+                # Use the correct MCP parameter format
                 tool_request = {
                     "jsonrpc": "2.0",
                     "id": self._get_next_id(),
@@ -452,6 +514,7 @@ class MCPSSEClient:
                         "arguments": {k: v for k, v in kwargs.items() if v is not None}
                     }
                 }
+                print(f"DEBUG: Using correct MCP format: {tool_request}")
 
                 request_id = tool_request["id"]
 
@@ -498,7 +561,12 @@ class MCPSSEClient:
                                 if response.get("id") == request_id:
                                     print(f"DEBUG: Found matching response for request {request_id}")
                                     if "result" in response:
-                                        return response["result"]
+                                        result = response["result"]
+                                        # Extract the actual data from MCP response structure
+                                        if isinstance(result, dict) and "structuredContent" in result:
+                                            return result["structuredContent"].get("result", result)
+                                        else:
+                                            return result
                                     elif "error" in response:
                                         return {"error": f"MCP error: {response['error']}"}
                                     else:
@@ -529,8 +597,8 @@ class MCPSSEClient:
 
 # Global MCP client instance - using HTTP SSE
 mcp_client = MCPSSEClient(
-    sse_url=os.getenv("JIRA_MCP_SSE_URL"),
-    snowflake_token=os.getenv("JIRA_MCP_SNOWFLAKE_TOKEN")
+    sse_url=os.getenv("JIRA_MCP_SSE_URL", "https://jira-mcp-snowflake.mcp-playground-poc.devshift.net/sse"),
+    snowflake_token=os.getenv("JIRA_MCP_SNOWFLAKE_TOKEN", "")
 )
 
 
