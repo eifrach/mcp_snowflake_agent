@@ -6,6 +6,7 @@ import os
 import aiohttp
 import ssl
 from dotenv import load_dotenv
+from datetime import datetime, timedelta
 
 # Load environment variables from .env file
 load_dotenv()
@@ -925,27 +926,486 @@ async def get_jira_sprint_details(sprint_name: Optional[List[str]] = None, proje
         return {"error": f"Error getting JIRA sprint details: {str(e)}"}
 
 
+# Report generation utility functions
+def format_timestamp(timestamp: str) -> str:
+    """Format JIRA timestamp to human-readable format"""
+    if not timestamp:
+        return "Unknown"
+    try:
+        # Parse JIRA timestamp format
+        dt = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+        return dt.strftime('%Y-%m-%d %H:%M')
+    except:
+        return timestamp
+
+
+def map_priority(priority_id: str) -> str:
+    """Map priority ID to human-readable label"""
+    priority_map = {
+        '1': 'Highest',
+        '2': 'High',
+        '3': 'Medium',
+        '4': 'Low',
+        '5': 'Lowest'
+    }
+    return priority_map.get(str(priority_id), f"Priority {priority_id}")
+
+
+def map_status(status_id: str) -> str:
+    """Map status ID to human-readable label"""
+    status_map = {
+        '1': 'Open',
+        '3': 'In Progress',
+        '4': 'Reopened',
+        '5': 'Resolved',
+        '6': 'Closed',
+        '10000': 'To Do',
+        '10001': 'Done'
+    }
+    return status_map.get(str(status_id), f"Status {status_id}")
+
+
+def map_issue_type(type_id: str) -> str:
+    """Map issue type ID to human-readable label"""
+    type_map = {
+        '1': 'Bug',
+        '2': 'Feature',
+        '3': 'Task',
+        '4': 'Improvement',
+        '5': 'Sub-task',
+        '6': 'Epic',
+        '7': 'Story'
+    }
+    return type_map.get(str(type_id), f"Type {type_id}")
+
+
+async def generate_weekly_report(project: str, days: int = 7, components: Optional[str] = None) -> Dict[str, Any]:
+    """Generate a weekly accomplishments report for a specific JIRA project.
+
+    This function creates a comprehensive report including:
+    - Issues updated in the specified time period
+    - Separation of bugs vs other issues
+    - Summary statistics
+    - HTML report generation
+
+    Args:
+        project: JIRA project key (e.g., 'SMQE', 'OSIM')
+        days: Number of days to look back for analysis (default: 7)
+        components: Optional comma-separated components to filter by
+
+    Returns:
+        dict: Report data including issues, statistics, and HTML content
+    """
+    try:
+        print(f"📊 Generating weekly report for {project} (last {days} days)")
+
+        # Step 1: Get all issues updated in the specified period
+        print(f"📡 Fetching issues updated in last {days} days...")
+
+        # Calculate date range
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days)
+
+        # Fetch issues using the existing list_jira_issues function
+        issues_result = await list_jira_issues(
+            project=project,
+            updated_days=days,
+            limit=100
+        )
+
+        if "error" in issues_result:
+            return {"error": f"Failed to fetch issues: {issues_result['error']}"}
+
+        issues = issues_result.get('issues', [])
+        print(f"   📊 Found {len(issues)} issues with recent activity")
+
+        if not issues:
+            return {
+                "project": project,
+                "period_days": days,
+                "total_issues": 0,
+                "bugs": [],
+                "non_bugs": [],
+                "bug_count": 0,
+                "non_bug_count": 0,
+                "report": f"No issues found with activity in the last {days} days for {project}.",
+                "html_report": generate_simple_html_report(project, days, [], [])
+            }
+
+        # Step 2: Separate bugs from non-bugs
+        print(f"🔄 Separating bugs from other issues...")
+        bugs = []
+        non_bugs = []
+
+        for issue in issues:
+            issue_type = issue.get('issue_type', 'Unknown')
+            if str(issue_type) == '1':  # Bug type = 1
+                bugs.append(issue)
+            else:
+                non_bugs.append(issue)
+
+        print(f"   🐛 Found {len(bugs)} bugs")
+        print(f"   📋 Found {len(non_bugs)} non-bug issues")
+
+        # Step 3: Get detailed information for key issues
+        if issues:
+            # Get details for up to 10 most recent issues for the report
+            recent_issues = sorted(issues, key=lambda x: x.get('updated', ''), reverse=True)[:10]
+            issue_keys = [issue.get('key') for issue in recent_issues if issue.get('key')]
+
+            if issue_keys:
+                print(f"📡 Fetching detailed information for {len(issue_keys)} key issues...")
+                details_result = await get_jira_issue_details(issue_keys)
+
+                if "error" not in details_result:
+                    # Update issues with detailed information
+                    detailed_issues = details_result.get('issues', {})
+                    for issue in recent_issues:
+                        issue_key = issue.get('key')
+                        if issue_key in detailed_issues:
+                            issue.update(detailed_issues[issue_key])
+
+        # Step 4: Generate report summary
+        report_text = generate_report_summary(project, days, bugs, non_bugs, issues)
+
+        # Step 5: Generate HTML report
+        html_report = generate_html_report(project, days, bugs, non_bugs, components)
+
+        return {
+            "project": project,
+            "period_days": days,
+            "total_issues": len(issues),
+            "bugs": bugs,
+            "non_bugs": non_bugs,
+            "bug_count": len(bugs),
+            "non_bug_count": len(non_bugs),
+            "report": report_text,
+            "html_report": html_report,
+            "success": True
+        }
+
+    except Exception as e:
+        print(f"❌ Error generating weekly report: {str(e)}")
+        return {"error": f"Error generating weekly report: {str(e)}"}
+
+
+def generate_report_summary(project: str, days: int, bugs: List[Dict], non_bugs: List[Dict], all_issues: List[Dict]) -> str:
+    """Generate a text summary of the weekly report"""
+
+    summary = f"# Weekly Accomplishments Report - {project}\n\n"
+    summary += f"**Analysis Period:** Last {days} days\n"
+    summary += f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+
+    summary += "## Summary Statistics\n\n"
+    summary += f"- **Total Issues with Activity:** {len(all_issues)}\n"
+    summary += f"- **Bugs:** {len(bugs)}\n"
+    summary += f"- **Other Issues:** {len(non_bugs)}\n\n"
+
+    if bugs:
+        summary += "## Recent Bugs\n\n"
+        for bug in bugs[:5]:  # Show first 5 bugs
+            key = bug.get('key', 'Unknown')
+            summary_text = bug.get('summary', 'No summary')
+            status = map_status(bug.get('status', 'Unknown'))
+            priority = map_priority(bug.get('priority', 'Unknown'))
+            summary += f"- **{key}**: {summary_text}\n"
+            summary += f"  - Status: {status}, Priority: {priority}\n"
+
+        if len(bugs) > 5:
+            summary += f"\n*... and {len(bugs) - 5} more bugs*\n"
+
+    if non_bugs:
+        summary += "\n## Recent Accomplishments\n\n"
+        for issue in non_bugs[:5]:  # Show first 5 non-bugs
+            key = issue.get('key', 'Unknown')
+            summary_text = issue.get('summary', 'No summary')
+            issue_type = map_issue_type(issue.get('issue_type', 'Unknown'))
+            status = map_status(issue.get('status', 'Unknown'))
+            summary += f"- **{key}**: {summary_text}\n"
+            summary += f"  - Type: {issue_type}, Status: {status}\n"
+
+        if len(non_bugs) > 5:
+            summary += f"\n*... and {len(non_bugs) - 5} more items*\n"
+
+    return summary
+
+
+def generate_html_report(project: str, days: int, bugs: List[Dict], non_bugs: List[Dict], components: Optional[str] = None) -> str:
+    """Generate HTML report for the weekly accomplishments"""
+
+    jira_base_url = os.getenv("JIRA_BASE_URL", "")
+
+    # Generate bugs table
+    bugs_table = ""
+    if bugs:
+        bugs_rows = ""
+        for bug in bugs:
+            key = bug.get('key', 'Unknown')
+            summary = bug.get('summary', 'No summary')
+            status = map_status(bug.get('status', 'Unknown'))
+            priority = map_priority(bug.get('priority', 'Unknown'))
+            updated = format_timestamp(bug.get('updated', ''))
+
+            jira_link = f"{jira_base_url}/browse/{key}" if jira_base_url else f"#{key}"
+
+            bugs_rows += f"""
+                <tr>
+                    <td><a href="{jira_link}" target="_blank">{key}</a></td>
+                    <td>{summary}</td>
+                    <td>{priority}</td>
+                    <td>{status}</td>
+                    <td>{updated}</td>
+                </tr>
+            """
+
+        bugs_table = f"""
+            <h3>🐛 Bugs ({len(bugs)} total)</h3>
+            <table class="issues-table">
+                <thead>
+                    <tr>
+                        <th>Key</th>
+                        <th>Summary</th>
+                        <th>Priority</th>
+                        <th>Status</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {bugs_rows}
+                </tbody>
+            </table>
+        """
+
+    # Generate accomplishments table
+    accomplishments_table = ""
+    if non_bugs:
+        accomplishments_rows = ""
+        for issue in non_bugs:
+            key = issue.get('key', 'Unknown')
+            summary = issue.get('summary', 'No summary')
+            issue_type = map_issue_type(issue.get('issue_type', 'Unknown'))
+            status = map_status(issue.get('status', 'Unknown'))
+            updated = format_timestamp(issue.get('updated', ''))
+
+            jira_link = f"{jira_base_url}/browse/{key}" if jira_base_url else f"#{key}"
+
+            accomplishments_rows += f"""
+                <tr>
+                    <td><a href="{jira_link}" target="_blank">{key}</a></td>
+                    <td>{summary}</td>
+                    <td>{issue_type}</td>
+                    <td>{status}</td>
+                    <td>{updated}</td>
+                </tr>
+            """
+
+        accomplishments_table = f"""
+            <h3>🎯 Recent Accomplishments ({len(non_bugs)} total)</h3>
+            <table class="issues-table">
+                <thead>
+                    <tr>
+                        <th>Key</th>
+                        <th>Summary</th>
+                        <th>Type</th>
+                        <th>Status</th>
+                        <th>Updated</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {accomplishments_rows}
+                </tbody>
+            </table>
+        """
+
+    components_display = f"<strong>Components:</strong> {components}<br>" if components else ""
+
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Weekly Report - {project}</title>
+        <style>
+            body {{
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+                margin: 0;
+                padding: 20px;
+                background-color: #f5f5f5;
+                color: #333;
+            }}
+            .container {{
+                max-width: 1200px;
+                margin: 0 auto;
+                background-color: white;
+                padding: 30px;
+                border-radius: 10px;
+                box-shadow: 0 0 20px rgba(0,0,0,0.1);
+            }}
+            h1 {{
+                color: #2c3e50;
+                text-align: center;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 10px;
+                margin-bottom: 30px;
+            }}
+            h3 {{
+                color: #2c3e50;
+                margin-top: 25px;
+            }}
+            .report-meta {{
+                text-align: center;
+                color: #7f8c8d;
+                font-size: 0.9em;
+                margin-bottom: 30px;
+                padding: 15px;
+                background-color: #ecf0f1;
+                border-radius: 5px;
+            }}
+            .summary-stats {{
+                background-color: #ecf0f1;
+                padding: 20px;
+                border-radius: 8px;
+                margin-bottom: 30px;
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                gap: 15px;
+            }}
+            .stat-item {{
+                text-align: center;
+                padding: 10px;
+                background-color: white;
+                border-radius: 5px;
+                box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            }}
+            .stat-number {{
+                font-size: 2em;
+                font-weight: bold;
+                color: #3498db;
+            }}
+            .stat-label {{
+                font-size: 0.9em;
+                color: #7f8c8d;
+                margin-top: 5px;
+            }}
+            .issues-table {{
+                width: 100%;
+                border-collapse: collapse;
+                margin-top: 15px;
+                font-size: 0.9em;
+            }}
+            .issues-table th {{
+                background-color: #34495e;
+                color: white;
+                padding: 12px 8px;
+                text-align: left;
+                border: 1px solid #2c3e50;
+            }}
+            .issues-table td {{
+                padding: 10px 8px;
+                border: 1px solid #ddd;
+                vertical-align: top;
+            }}
+            .issues-table tr:nth-child(even) {{
+                background-color: #f8f9fa;
+            }}
+            .issues-table tr:hover {{
+                background-color: #e8f4f8;
+            }}
+            a {{
+                color: #3498db;
+                text-decoration: none;
+            }}
+            a:hover {{
+                text-decoration: underline;
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>📊 Weekly Report - {project}</h1>
+
+            <div class="report-meta">
+                <strong>Project:</strong> {project}<br>
+                {components_display}
+                <strong>Period:</strong> Last {days} days<br>
+                <strong>Generated:</strong> {datetime.now().strftime('%B %d, %Y at %I:%M %p')}
+            </div>
+
+            <div class="summary-stats">
+                <div class="stat-item">
+                    <div class="stat-number">{len(bugs) + len(non_bugs)}</div>
+                    <div class="stat-label">Total Issues</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{len(bugs)}</div>
+                    <div class="stat-label">Bugs</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-number">{len(non_bugs)}</div>
+                    <div class="stat-label">Accomplishments</div>
+                </div>
+            </div>
+
+            {bugs_table}
+            {accomplishments_table}
+        </div>
+    </body>
+    </html>
+    """
+
+    return html_content
+
+
+def generate_simple_html_report(project: str, days: int, bugs: List[Dict], non_bugs: List[Dict]) -> str:
+    """Generate a simple HTML report when no issues are found"""
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Weekly Report - {project}</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; margin: 20px; }}
+            .container {{ max-width: 800px; margin: 0 auto; }}
+            h1 {{ color: #2c3e50; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Weekly Report - {project}</h1>
+            <p>No issues found with activity in the last {days} days.</p>
+            <p>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+        </div>
+    </body>
+    </html>
+    """
+
+
 root_agent = Agent(
     name="jira_mcp_snowflake_agent",
     model="gemini-2.5-flash",
     description=(
         "Specialized agent for analyzing and retrieving JIRA data from Snowflake database. "
         "Provides comprehensive access to issues, projects, sprints, and relationships through "
-        "MCP (Model Context Protocol) integration."
+        "MCP (Model Context Protocol) integration. Can generate detailed weekly accomplishments reports."
     ),
     instruction=(
         "You are a helpful agent specialized in analyzing and retrieving JIRA data stored in Snowflake. "
         "You can help users search for issues, get detailed issue information including comments, "
-        "view project summaries and statistics, explore issue links and relationships, and analyze "
-        "sprint details. Use the available JIRA tools to answer questions about projects, issues, "
-        "sprints, and their relationships. You can filter by various criteria like project, status, "
-        "priority, components, versions, and time ranges to provide targeted insights."
+        "view project summaries and statistics, explore issue links and relationships, analyze "
+        "sprint details, and generate comprehensive weekly accomplishments reports. Use the available JIRA tools "
+        "to answer questions about projects, issues, sprints, and their relationships. You can filter by various "
+        "criteria like project, status, priority, components, versions, and time ranges to provide targeted insights. "
+        "For weekly reports, use the generate_weekly_report function which creates both text summaries and HTML reports "
+        "with detailed statistics, bug tracking, and accomplishments analysis."
     ),
     tools=[
         list_jira_issues,
         get_jira_issue_details,
         get_jira_project_summary,
         get_jira_issue_links,
-        get_jira_sprint_details
+        get_jira_sprint_details,
+        generate_weekly_report
     ],
 )
