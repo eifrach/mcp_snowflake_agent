@@ -1,14 +1,10 @@
 import asyncio
 import json
-import sys
 from typing import Dict, Any, List, Optional
 from google.adk.agents import Agent
 import os
-import subprocess
 import aiohttp
-import asyncio
 import ssl
-from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -16,7 +12,11 @@ load_dotenv()
 
 
 class MCPSSEClient:
-    """MCP client that communicates with the MCP server via HTTP SSE"""
+    """MCP (Model Context Protocol) client that communicates with JIRA MCP server via HTTP Server-Sent Events (SSE).
+    
+    This client handles authentication with Snowflake tokens and manages the complex SSE-based
+    communication protocol required for the JIRA MCP server integration.
+    """
 
     def __init__(self, sse_url: str, snowflake_token: str):
         if not sse_url:
@@ -37,7 +37,11 @@ class MCPSSEClient:
         self._pending_requests = {}
 
     async def _ensure_connection(self):
-        """Ensure HTTP session is initialized"""
+        """Ensure HTTP session is initialized and MCP protocol handshake is completed.
+        
+        This method establishes the aiohttp session, SSE connection, and completes the
+        MCP initialization sequence required before making tool calls.
+        """
         if self._session is None:
             # Create SSL context that allows self-signed certificates for internal environments
             ssl_context = ssl.create_default_context()
@@ -90,7 +94,11 @@ class MCPSSEClient:
             self._initialized = True
 
     async def _establish_sse_session(self):
-        """Establish SSE session and get session ID"""
+        """Establish Server-Sent Events session and extract session ID.
+        
+        Connects to the SSE endpoint and waits for the session ID to be provided
+        in the event stream, which is required for subsequent HTTP requests.
+        """
         headers = {
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -133,12 +141,26 @@ class MCPSSEClient:
             raise
 
     def _get_next_id(self) -> int:
-        """Get next request ID"""
+        """Generate next sequential request ID for JSON-RPC protocol.
+        
+        Returns:
+            int: Incremented request ID for tracking request/response pairs
+        """
         self._request_id += 1
         return self._request_id
 
     async def _send_http_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Send a JSON-RPC request via messages endpoint and wait for response"""
+        """Send a JSON-RPC request via messages endpoint and wait for response.
+        
+        Args:
+            request: JSON-RPC request dictionary with id, method, and params
+            
+        Returns:
+            dict: Response from the MCP server
+            
+        Raises:
+            Exception: If session not established or HTTP request fails
+        """
         if not self._session or not self._messages_url:
             raise Exception("Session not properly established")
 
@@ -173,7 +195,17 @@ class MCPSSEClient:
             raise
 
     async def _wait_for_sse_response(self, request_id: int) -> Dict[str, Any]:
-        """Wait for response from SSE stream"""
+        """Wait for response from SSE stream matching the given request ID.
+        
+        Args:
+            request_id: The JSON-RPC request ID to match against responses
+            
+        Returns:
+            dict: The matching response from the SSE stream
+            
+        Raises:
+            Exception: If timeout occurs or no matching response found
+        """
         headers = {
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
@@ -227,7 +259,11 @@ class MCPSSEClient:
             raise
 
     async def _send_http_notification(self, notification: Dict[str, Any]):
-        """Send a JSON-RPC notification via messages endpoint (no response expected)"""
+        """Send a JSON-RPC notification via messages endpoint (no response expected).
+        
+        Args:
+            notification: JSON-RPC notification dictionary with method and params
+        """
         if not self._session or not self._messages_url:
             print("WARNING: Session not properly established for notification")
             return
@@ -246,7 +282,17 @@ class MCPSSEClient:
             print(f"WARNING: Failed to send notification: {e}")
 
     async def call_tool_simple_http(self, tool_name: str, **kwargs) -> Dict[str, Any]:
-        """Call a tool using simple HTTP without SSE complexity"""
+        """Call a tool using direct HTTP POST without SSE complexity.
+        
+        This is a simplified approach that bypasses the SSE protocol for direct tool calls.
+        
+        Args:
+            tool_name: Name of the MCP tool to call
+            **kwargs: Arguments to pass to the tool
+            
+        Returns:
+            dict: Result from the MCP server or error information
+        """
         try:
             if self._session is None:
                 ssl_context = ssl.create_default_context()
@@ -289,7 +335,18 @@ class MCPSSEClient:
             return {"error": f"Error in simple HTTP call: {str(e)}"}
 
     async def call_tool_direct_http(self, tool_name: str, **kwargs) -> Dict[str, Any]:
-        """Try direct HTTP call to the working endpoint first"""
+        """Try direct HTTP call to a known working endpoint for specific tools.
+        
+        This method contains hardcoded logic for specific tool calls that have
+        been verified to work with direct HTTP requests.
+        
+        Args:
+            tool_name: Name of the MCP tool to call
+            **kwargs: Arguments to pass to the tool
+            
+        Returns:
+            dict: Result from the MCP server or error information
+        """
         try:
             if self._session is None:
                 ssl_context = ssl.create_default_context()
@@ -586,7 +643,11 @@ class MCPSSEClient:
             return {"error": f"Error calling MCP server: {str(e)}"}
 
     async def close(self):
-        """Close the HTTP session"""
+        """Close the HTTP session and reset connection state.
+        
+        Properly cleans up the aiohttp session and resets all connection-related
+        instance variables to allow for fresh connections.
+        """
         if self._session:
             await self._session.close()
             self._session = None
@@ -603,14 +664,20 @@ mcp_client = MCPSSEClient(
 
 
 async def call_mcp_tool(tool_name: str, **kwargs) -> Dict[str, Any]:
-    """Call a tool on the JIRA MCP server.
+    """Call a tool on the JIRA MCP server using the global MCP client.
+
+    This is a convenience function that wraps the global mcp_client.call_tool method
+    with additional error handling and logging.
 
     Args:
-        tool_name: Name of the MCP tool to call
+        tool_name: Name of the MCP tool to call (e.g., 'list_jira_issues')
         **kwargs: Arguments to pass to the tool
 
     Returns:
         dict: Result from the MCP server
+        
+    Raises:
+        Exception: Re-raises any exceptions from the underlying MCP client
     """
     print(f"DEBUG: call_mcp_tool starting for {tool_name} with kwargs: {kwargs}")
     try:
@@ -623,13 +690,21 @@ async def call_mcp_tool(tool_name: str, **kwargs) -> Dict[str, Any]:
 
 
 class JIRAMCPToolset:
-    """Toolset wrapper for JIRA MCP tools"""
+    """Toolset wrapper for managing and discovering JIRA MCP tools.
+    
+    This class provides a higher-level interface for interacting with the MCP server's
+    available tools, including dynamic tool discovery and wrapper creation.
+    """
 
     def __init__(self, client):
         self.client = client
 
     async def get_tools(self):
-        """Get available tools from the MCP server"""
+        """Discover and retrieve available tools from the MCP server.
+        
+        Returns:
+            list[JIRAMCPTool]: List of available tool wrappers, empty list on error
+        """
         try:
             await self.client._ensure_connection()
 
@@ -659,14 +734,24 @@ class JIRAMCPToolset:
 
 
 class JIRAMCPTool:
-    """Individual JIRA MCP tool wrapper"""
+    """Wrapper for individual JIRA MCP tools.
+    
+    Provides a simple interface for calling specific MCP tools by name.
+    """
 
     def __init__(self, name: str, client):
         self.name = name
         self.client = client
 
     async def call(self, **kwargs):
-        """Call this tool with the given arguments"""
+        """Call this tool with the given arguments.
+        
+        Args:
+            **kwargs: Arguments to pass to the underlying MCP tool
+            
+        Returns:
+            dict: Result from the MCP server
+        """
         return await self.client.call_tool(self.name, **kwargs)
 
 
@@ -692,26 +777,29 @@ async def list_jira_issues(
     fixed_version: Optional[str] = None,
     affected_version: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """List JIRA issues from Snowflake with various filters.
+    """List JIRA issues from Snowflake database with comprehensive filtering options.
+    
+    This function queries the JIRA data stored in Snowflake using the MCP server,
+    allowing for complex filtering and searching across multiple issue attributes.
     
     Args:
         project: Filter by project key (e.g., 'SMQE', 'OSIM')
-        issue_keys: List of JIRA issue keys (e.g., ['SMQE-1280', 'SMQE-1281'])
-        issue_type: Filter by issue type ID
-        status: Filter by issue status ID
-        priority: Filter by priority ID
+        issue_keys: List of specific JIRA issue keys (e.g., ['SMQE-1280', 'SMQE-1281'])
+        issue_type: Filter by issue type ID (numeric)
+        status: Filter by issue status ID (numeric) 
+        priority: Filter by priority ID (numeric)
         limit: Maximum number of issues to return (default: 50)
-        search_text: Search in summary and description fields
-        timeframe: Filter issues where ANY date is within last N days (default: 0 = disabled)
-        components: Comma-separated list; match ANY in component name
-        created_days: Filter by creation date within last N days (default: 0 = disabled)
-        updated_days: Filter by update date within last N days (default: 0 = disabled)
-        resolved_days: Filter by resolution date within last N days (default: 0 = disabled)
-        fixed_version: Filter by fixed/target version name
-        affected_version: Filter by affected version name
+        search_text: Text search in summary and description fields
+        timeframe: Filter issues where ANY date is within last N days (0 = disabled)
+        components: Comma-separated component names; matches ANY component
+        created_days: Filter by creation date within last N days (0 = disabled)
+        updated_days: Filter by update date within last N days (0 = disabled)
+        resolved_days: Filter by resolution date within last N days (0 = disabled)
+        fixed_version: Filter by fixed/target version name (exact match)
+        affected_version: Filter by affected version name (exact match)
         
     Returns:
-        Dictionary containing issues list and metadata
+        dict: Dictionary containing 'issues' list and metadata, or error information
     """
     try:
         result = await call_mcp_tool(
@@ -737,13 +825,17 @@ async def list_jira_issues(
 
 
 async def get_jira_issue_details(issue_keys: List[str]) -> Dict[str, Any]:
-    """Get detailed information for multiple JIRA issues by their keys.
+    """Get comprehensive detailed information for multiple JIRA issues.
+
+    Retrieves full issue details including descriptions, comments, custom fields,
+    attachments, and other metadata for the specified issue keys.
 
     Args:
         issue_keys: List of JIRA issue keys (e.g., ['SMQE-1280', 'SMQE-1281'])
 
     Returns:
-        Dictionary containing detailed issue information including comments
+        dict: Dictionary containing detailed issue information including comments,
+              or error information if the request fails or times out
     """
     try:
         print(f"DEBUG: Starting get_jira_issue_details for {issue_keys}")
@@ -765,10 +857,14 @@ async def get_jira_issue_details(issue_keys: List[str]) -> Dict[str, Any]:
 
 
 async def get_jira_project_summary() -> Dict[str, Any]:
-    """Get a summary of all projects in the JIRA data.
+    """Get statistical summary of all JIRA projects in the Snowflake database.
+    
+    Provides overview statistics including issue counts, project keys, and
+    other aggregated metrics across all available JIRA projects.
     
     Returns:
-        Dictionary containing project statistics
+        dict: Dictionary containing project statistics and metadata,
+              or error information if the request fails
     """
     try:
         result = await call_mcp_tool("get_jira_project_summary")
@@ -778,13 +874,17 @@ async def get_jira_project_summary() -> Dict[str, Any]:
 
 
 async def get_jira_issue_links(issue_key: str) -> Dict[str, Any]:
-    """Get issue links for a specific JIRA issue by its key.
+    """Get issue links and relationships for a specific JIRA issue.
+
+    Retrieves all linked issues, including blocks/blocked by, relates to,
+    duplicates, and other relationship types for the specified issue.
 
     Args:
         issue_key: The JIRA issue key (e.g., 'SMQE-1280')
 
     Returns:
-        Dictionary containing issue links information
+        dict: Dictionary containing issue links information and relationship types,
+              or error information if the request fails
     """
     try:
         result = await call_mcp_tool(
@@ -797,16 +897,20 @@ async def get_jira_issue_links(issue_key: str) -> Dict[str, Any]:
 
 
 async def get_jira_sprint_details(sprint_name: Optional[List[str]] = None, project: Optional[str] = None, board_id: Optional[int] = None, sprint_state: Optional[str] = None) -> Dict[str, Any]:
-    """Get JIRA sprint details from Snowflake.
+    """Get detailed JIRA sprint information from Snowflake database.
+
+    Retrieves sprint details including start/end dates, goals, issue counts,
+    and other sprint-related metadata based on the specified filters.
 
     Args:
-        sprint_name: List of sprint names to retrieve (e.g., ['Sprint 1', 'Sprint 2'])
+        sprint_name: List of specific sprint names to retrieve (e.g., ['Sprint 1', 'Sprint 2'])
         project: Filter by project key (e.g., 'SMQE', 'OSIM')
-        board_id: Filter by board ID
+        board_id: Filter by specific board ID (numeric)
         sprint_state: Filter by sprint state ('active', 'closed', 'future')
 
     Returns:
-        Dictionary containing sprint information
+        dict: Dictionary containing sprint information, issue assignments, and metrics,
+              or error information if the request fails
     """
     try:
         result = await call_mcp_tool(
@@ -825,13 +929,17 @@ root_agent = Agent(
     name="jira_mcp_snowflake_agent",
     model="gemini-2.5-flash",
     description=(
-        "get jira issues from snowflake"
+        "Specialized agent for analyzing and retrieving JIRA data from Snowflake database. "
+        "Provides comprehensive access to issues, projects, sprints, and relationships through "
+        "MCP (Model Context Protocol) integration."
     ),
     instruction=(
-        "You are a helpful agent who can answer user questions about JIRA issues stored in Snowflake, "
-        "as well as the time and weather in a city. For JIRA queries, you can search issues, get detailed "
-        "information, view project summaries, and explore issue links. Use the appropriate JIRA tools "
-        "when users ask about issues, projects, or any JIRA-related information."
+        "You are a helpful agent specialized in analyzing and retrieving JIRA data stored in Snowflake. "
+        "You can help users search for issues, get detailed issue information including comments, "
+        "view project summaries and statistics, explore issue links and relationships, and analyze "
+        "sprint details. Use the available JIRA tools to answer questions about projects, issues, "
+        "sprints, and their relationships. You can filter by various criteria like project, status, "
+        "priority, components, versions, and time ranges to provide targeted insights."
     ),
     tools=[
         list_jira_issues,
