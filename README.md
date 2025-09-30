@@ -1,77 +1,106 @@
-# ADK Agent - JIRA MCP Integration
+# JIRA MCP Snowflake Agent
 
-A Google ADK agent that integrates with JIRA data through a Model Context Protocol (MCP) server connected to Snowflake.
+This project demonstrates two deployment approaches for a JIRA analysis agent that connects to a Snowflake database through MCP (Model Context Protocol) integration.
 
-## Features
+## Project Structure
 
-- **JIRA Issue Details**: Get detailed information about JIRA issues
-- **JIRA Issue Listing**: Search and filter JIRA issues
-- **Project Summaries**: Get overview of JIRA projects
-- **Issue Links**: Explore relationships between JIRA issues
-- **Sprint Information**: Get details about sprints and their issues
+```
+├── agentengine/          # Direct Vertex AI Agent Engine deployment
+│   ├── src/             # Agent source code
+│   ├── deploy.py        # Deployment script
+│   ├── pyproject.toml   # Dependencies
+│   └── README.md        # AgentEngine-specific docs
+├── agentspace/          # AgentSpace deployment via Discovery Engine
+│   ├── agent_manager.sh # Management script
+│   ├── jira_agent.json  # Agent definition
+│   └── README.md        # AgentSpace-specific docs
+└── README.md           # This file
+```
 
-## Setup
+## Deployment Approaches
 
-### 1. Install Dependencies
+### 1. AgentEngine (Direct)
+- **Directory**: `agentengine/`
+- **Method**: Direct deployment to Vertex AI Agent Engine
+- **Use Case**: Backend reasoning engine, testing, development
+- **Documentation**: See [`agentengine/README.md`](agentengine/README.md)
+
+### 2. AgentSpace (User-Facing)
+- **Directory**: `agentspace/`
+- **Method**: AgentSpace via Discovery Engine API
+- **Use Case**: User-facing agent with UI, production deployment
+- **Documentation**: See [`agentspace/README.md`](agentspace/README.md)
+
+## Quick Start
+
+### 1. Deploy AgentEngine
 
 ```bash
-uv sync
+cd agentengine
+# Copy and configure environment
+cp .env.template .env
+# Edit .env with your GCP settings
+
+# Deploy the agent
+uv run deploy.py
+
+# Test the deployed agent
+uv run test_agent.py
 ```
 
-### 2. Environment Configuration
-
-Copy the example environment file and configure your credentials:
+### 2. Deploy to AgentSpace (Optional)
 
 ```bash
-cp .env.example ./snowflake_adk_agent/.env
+cd agentspace
+# Copy and configure environment
+cp .env.template .env
+# Edit .env with your AgentSpace settings
+
+# Update jira_agent.json with your values
+# Then create the agent
+./agent_manager.sh create jira_agent.json
 ```
 
-Edit `.env` with your actual values:
+## Agent Capabilities
 
-```env
-# JIRA MCP SSE URL - The Server-Sent Events endpoint for the JIRA MCP server
-JIRA_MCP_SSE_URL=https://your-jira-mcp-server.example.com/sse
+The agent provides comprehensive JIRA data analysis through:
 
-# Snowflake Token - Your authentication token for Snowflake access
-JIRA_MCP_SNOWFLAKE_TOKEN=your_snowflake_token_here
-```
-### 3. Login to google cloud account
+- **Issue Search**: Filter by project, status, priority, components, versions
+- **Issue Details**: Get full issue information including comments and attachments
+- **Project Analytics**: Statistical summaries across all projects
+- **Sprint Analysis**: Sprint details, issue assignments, and metrics
+- **Relationship Mapping**: Issue links and dependencies
 
-```bash
-gcloud auth application-default login
-```
+## MCP Integration
 
-### 4. Run the Agent locally with web
+The agent connects to a remote JIRA MCP server that provides access to JIRA data stored in Snowflake:
+- **Protocol**: HTTP Server-Sent Events (SSE)
+- **Configuration**: Set `JIRA_MCP_SSE_URL` in your `.env` file
+- **Authentication**: Configured via environment variables
 
-```bash
-uv run adk web --port=8001
-```
+## Configuration
 
-## Architecture
+Both deployment approaches require environment configuration:
 
-The agent uses:
-- **Google ADK**: For the agent framework and natural language processing
-- **MCP Protocol**: For communication with the JIRA data server
-- **Server-Sent Events (SSE)**: For real-time communication with the MCP server
-- **Snowflake**: As the backend data source for JIRA information
+1. **Copy template files**: Each directory has a `.env.template` file
+2. **Create `.env` files**: Copy and fill in your specific values
+3. **Update JSON configs**: For AgentSpace, update `jira_agent.json` placeholders
 
-## Available Tools
+See the README files in each directory for detailed configuration instructions.
 
-- `list_jira_issues`: Search and filter JIRA issues with various criteria
-- `get_jira_issue_details`: Get comprehensive details for specific JIRA issues
-- `get_jira_project_summary`: Get statistics and overview of JIRA projects
-- `get_jira_issue_links`: Explore issue relationships and dependencies
-- `get_jira_sprint_details`: Get information about sprints
+## Prerequisites
 
-## Example Queries
+- Google Cloud Platform project with required APIs enabled:
+  - Vertex AI API
+  - Cloud Storage API
+  - Discovery Engine API (for AgentSpace)
+- `gcloud` CLI authenticated
+- `uv` package manager installed
+- Python 3.12+
 
-- "Please describe JIRA issue TELCOV10N-682"
-- "Show me all open issues in the SMQE project"
-- "What's the summary of all JIRA projects?"
-- "Find issues created in the last 7 days"
+## Next Steps
 
-## Security
-
-- Environment variables are used for sensitive configuration
-- The `.env` file is excluded from version control
-- All communications use HTTPS with proper SSL validation
+1. Deploy the AgentEngine (see [`agentengine/README.md`](agentengine/README.md))
+2. Test the deployed agent
+3. Optionally deploy to AgentSpace (see [`agentspace/README.md`](agentspace/README.md))
+4. Integrate with your JIRA MCP server

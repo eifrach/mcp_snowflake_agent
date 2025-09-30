@@ -1,7 +1,8 @@
 import asyncio
 import json
 from typing import Dict, Any, List, Optional
-from google.adk.agents import Agent
+from google.adk.agents import LlmAgent
+from vertexai.preview.reasoning_engines import AdkApp
 import os
 import aiohttp
 import ssl
@@ -21,8 +22,9 @@ class MCPSSEClient:
     def __init__(self, sse_url: str, snowflake_token: str):
         if not sse_url:
             raise ValueError("sse_url cannot be None or empty. Please check your JIRA_MCP_SSE_URL environment variable.")
-        if not snowflake_token:
-            raise ValueError("snowflake_token cannot be None or empty. Please check your JIRA_MCP_SNOWFLAKE_TOKEN environment variable.")
+        # Token is optional for some endpoints
+        # if not snowflake_token:
+        #     raise ValueError("snowflake_token cannot be None or empty. Please check your JIRA_MCP_SNOWFLAKE_TOKEN environment variable.")
 
         self.sse_url = sse_url
         self.snowflake_token = snowflake_token
@@ -102,7 +104,6 @@ class MCPSSEClient:
         headers = {
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
-            "X-Snowflake-Token": self.snowflake_token
         }
 
         print("DEBUG: Establishing SSE session...")
@@ -165,8 +166,7 @@ class MCPSSEClient:
             raise Exception("Session not properly established")
 
         headers = {
-            "Content-Type": "application/json",
-            "X-Snowflake-Token": self.snowflake_token
+            "Content-Type": "application/json"
         }
 
         print(f"DEBUG: Sending request to {self._messages_url}: {request}")
@@ -210,7 +210,6 @@ class MCPSSEClient:
             "Accept": "text/event-stream",
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "X-Snowflake-Token": self.snowflake_token
         }
 
         # Listen to the original SSE endpoint for the response
@@ -269,8 +268,7 @@ class MCPSSEClient:
             return
 
         headers = {
-            "Content-Type": "application/json",
-            "X-Snowflake-Token": self.snowflake_token
+            "Content-Type": "application/json"
         }
 
         try:
@@ -314,8 +312,7 @@ class MCPSSEClient:
 
             headers = {
                 "Content-Type": "application/json",
-                "X-Snowflake-Token": self.snowflake_token
-            }
+                }
 
             # Try the direct tools endpoint
             tools_url = f"{self.base_url}/tools/call"
@@ -337,8 +334,8 @@ class MCPSSEClient:
     async def call_tool_direct_http(self, tool_name: str, **kwargs) -> Dict[str, Any]:
         """Try direct HTTP call to a known working endpoint for specific tools.
         
-        This method contains hardcoded logic for specific tool calls that have
-        been verified to work with direct HTTP requests.
+        This method attempts direct HTTP calls to the MCP server's tools endpoint
+        for tools that support synchronous responses.
         
         Args:
             tool_name: Name of the MCP tool to call
@@ -355,11 +352,11 @@ class MCPSSEClient:
                 connector = aiohttp.TCPConnector(ssl=ssl_context)
                 self._session = aiohttp.ClientSession(connector=connector)
 
-            # For TELCOV10N-682, let's try the working URL pattern from settings
+            # Try using the base URL tools endpoint
             if tool_name == "get_jira_issue_details" and "issue_keys" in kwargs:
-                working_url = "https://jira-mcp-snowflake.apps.int.stc.ai.preprod.us-east-1.aws.paas.redhat.com/tools/call"
+                tools_url = f"{self.base_url}/tools/call"
 
-                # Use the exact format that was working in curl
+                # Use standard MCP JSON-RPC format
                 request_payload = {
                     "jsonrpc": "2.0",
                     "id": 1,
@@ -374,13 +371,12 @@ class MCPSSEClient:
 
                 headers = {
                     "Content-Type": "application/json",
-                    "X-Snowflake-Token": self.snowflake_token
                 }
 
-                print(f"DEBUG: Trying direct call to {working_url}")
+                print(f"DEBUG: Trying direct call to {tools_url}")
                 timeout = aiohttp.ClientTimeout(total=30)
 
-                async with self._session.post(working_url, json=request_payload, headers=headers, timeout=timeout) as resp:
+                async with self._session.post(tools_url, json=request_payload, headers=headers, timeout=timeout) as resp:
                     print(f"DEBUG: Direct call response status: {resp.status}")
                     if resp.status == 200:
                         result = await resp.json()
@@ -422,8 +418,7 @@ class MCPSSEClient:
 
             headers = {
                 "Accept": "text/event-stream",
-                "X-Snowflake-Token": self.snowflake_token
-            }
+                }
 
             timeout = aiohttp.ClientTimeout(total=15)
 
@@ -453,8 +448,7 @@ class MCPSSEClient:
                 messages_url = f"{self.base_url}/messages/?session_id={session_id}"
                 post_headers = {
                     "Content-Type": "application/json",
-                    "X-Snowflake-Token": self.snowflake_token
-                }
+                        }
 
                 # Initialize the MCP session first
                 if not hasattr(self, '_initialized_session'):
@@ -577,8 +571,7 @@ class MCPSSEClient:
 
                 post_headers = {
                     "Content-Type": "application/json",
-                    "X-Snowflake-Token": self.snowflake_token
-                }
+                        }
 
                 print(f"DEBUG: Sending tool request {request_id} to {messages_url}")
 
@@ -659,7 +652,7 @@ class MCPSSEClient:
 # Global MCP client instance - using HTTP SSE
 mcp_client = MCPSSEClient(
     sse_url=os.getenv("JIRA_MCP_SSE_URL", "https://jira-mcp-snowflake.mcp-playground-poc.devshift.net/sse"),
-    snowflake_token=os.getenv("JIRA_MCP_SNOWFLAKE_TOKEN", "")
+    snowflake_token=""  # No token needed for remote hosted MCP
 )
 
 
@@ -925,27 +918,36 @@ async def get_jira_sprint_details(sprint_name: Optional[List[str]] = None, proje
         return {"error": f"Error getting JIRA sprint details: {str(e)}"}
 
 
-root_agent = Agent(
-    name="jira_mcp_snowflake_agent",
-    model="gemini-2.5-flash",
-    description=(
-        "Specialized agent for analyzing and retrieving JIRA data from Snowflake database. "
-        "Provides comprehensive access to issues, projects, sprints, and relationships through "
-        "MCP (Model Context Protocol) integration."
+# Define session builder
+def session_service_builder():
+    # This is needed to ensure InitGoogle and AdkApp setup is called first.
+    from google.adk.sessions import VertexAiSessionService
+
+    PROJECT_ID = os.getenv("PROJECT_ID")
+    LOCATION = os.getenv("LOCATION")
+    return VertexAiSessionService(project=PROJECT_ID, location=LOCATION)
+
+
+agent_app = AdkApp(
+    agent=LlmAgent(
+        model="gemini-2.5-flash",
+        name="jira_mcp_snowflake_agent",
+        instruction=(
+            "You are a helpful agent specialized in analyzing and retrieving JIRA data stored in Snowflake. "
+            "You can help users search for issues, get detailed issue information including comments, "
+            "view project summaries and statistics, explore issue links and relationships, and analyze "
+            "sprint details. Use the available JIRA tools to answer questions about projects, issues, "
+            "sprints, and their relationships. You can filter by various criteria like project, status, "
+            "priority, components, versions, and time ranges to provide targeted insights."
+        ),
+        tools=[
+            list_jira_issues,
+            get_jira_issue_details,
+            get_jira_project_summary,
+            get_jira_issue_links,
+            get_jira_sprint_details
+        ],
     ),
-    instruction=(
-        "You are a helpful agent specialized in analyzing and retrieving JIRA data stored in Snowflake. "
-        "You can help users search for issues, get detailed issue information including comments, "
-        "view project summaries and statistics, explore issue links and relationships, and analyze "
-        "sprint details. Use the available JIRA tools to answer questions about projects, issues, "
-        "sprints, and their relationships. You can filter by various criteria like project, status, "
-        "priority, components, versions, and time ranges to provide targeted insights."
-    ),
-    tools=[
-        list_jira_issues,
-        get_jira_issue_details,
-        get_jira_project_summary,
-        get_jira_issue_links,
-        get_jira_sprint_details
-    ],
+    enable_tracing=True,
+    session_service_builder=session_service_builder,
 )
